@@ -1,0 +1,32 @@
+{
+  "movies": [
+    {
+      "name": "Thalaivan Thalaivii",
+      "url": "https://in.bookmyshow.com/movies/chennai/thalaivan-thalaivii/ET00444587",
+      "city": "chennai",
+      "check_interval": 600,
+      "enabled": true
+    }
+  ],
+  "alerts": {
+    "email_enabled": false,
+    "sms_enabled": true,
+    "desktop_enabled": true,
+    "sound_enabled": true
+  },
+  "notifications": {
+    "email": {
+      "smtp_server": "smtp.gmail.com",
+      "smtp_port": 587,
+      "username": "${EMAIL_USERNAME}",
+      "password": "${EMAIL_PASSWORD}",
+      "to_email": "${EMAIL_TO}"
+    },
+    "twilio": {
+      "account_sid": "${TWILIO_ACCOUNT_SID}",
+      "auth_token": "${TWILIO_AUTH_TOKEN}",
+      "from_number": "${TWILIO_FROM_NUMBER}",
+      "to_number": "${TWILIO_TO_NUMBER}"
+    }
+  }
+}
