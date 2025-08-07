@@ -1,5 +1,7 @@
-selenium>=4.15.0
-webdriver-manager>=4.0.0
-twilio>=8.10.0
-plyer>=2.1.0
-python-dotenv>=1.0.0
+flask==3.0.0
+selenium==4.15.2
+webdriver-manager==4.0.1
+twilio==8.10.0
+plyer==2.1.0
+python-dotenv==1.0.0
+gunicorn==21.2.0

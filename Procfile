@@ -1,0 +1,1 @@
+web: python movie_alert.py --web-and-monitor

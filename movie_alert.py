@@ -17,6 +17,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import smtplib
 import argparse
+import threading
+from flask import Flask, request, jsonify, render_template_string
 
 # Optional imports for enhanced functionality
 try:
@@ -209,12 +211,21 @@ class BookMyShowMonitor:
             options.add_experimental_option("excludeSwitches", ["enable-automation"])
             options.add_experimental_option('useAutomationExtension', False)
             
-            # Standard options
-            options.add_argument('--headless')
+            # Standard options for cloud deployment
+            options.add_argument('--headless=new')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
             options.add_argument('--disable-gpu')
+            options.add_argument('--disable-software-rasterizer')
+            options.add_argument('--disable-extensions')
+            options.add_argument('--disable-plugins')
             options.add_argument('--window-size=1920,1080')
+            options.add_argument('--remote-debugging-port=9222')
+            
+            # Set Chrome binary path for cloud deployment
+            chrome_bin = os.environ.get('CHROME_BIN')
+            if chrome_bin:
+                options.binary_location = chrome_bin
             
             service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=options)
@@ -636,6 +647,186 @@ class BookMyShowMonitor:
         self.logger.info(f"Added movie: {name}")
         print(f"✅ Added '{name}' to monitoring list")
         
+    def start_web_server(self, port: int = 5678):
+        """Start Flask web server for config management"""
+        app = Flask(__name__)
+        
+        # HTML template for the web interface
+        HTML_TEMPLATE = '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>BookMyShow Monitor</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                .container { max-width: 800px; margin: 0 auto; }
+                .movie { border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 5px; }
+                .movie.enabled { border-left: 4px solid #28a745; }
+                .movie.disabled { border-left: 4px solid #dc3545; }
+                input, select { padding: 8px; margin: 5px; border: 1px solid #ddd; border-radius: 3px; }
+                button { background: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 3px; cursor: pointer; }
+                button:hover { background: #0056b3; }
+                .toggle-btn { background: #28a745; }
+                .toggle-btn.disabled { background: #dc3545; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🎬 BookMyShow Monitor</h1>
+                
+                <div id="movies"></div>
+                
+                <h3>Add New Movie</h3>
+                <div>
+                    <input type="text" id="movieName" placeholder="Movie Name" style="width: 200px;">
+                    <input type="text" id="movieUrl" placeholder="BookMyShow URL" style="width: 300px;">
+                    <input type="text" id="movieCity" placeholder="City" value="chennai" style="width: 100px;">
+                    <input type="number" id="movieInterval" placeholder="Interval (seconds)" value="900" style="width: 150px;">
+                    <button onclick="addMovie()">Add Movie</button>
+                </div>
+            </div>
+
+            <script>
+                async function loadMovies() {
+                    const response = await fetch('/api/config');
+                    const config = await response.json();
+                    
+                    const moviesDiv = document.getElementById('movies');
+                    moviesDiv.innerHTML = '<h3>Current Movies</h3>';
+                    
+                    config.movies.forEach((movie, index) => {
+                        const movieDiv = document.createElement('div');
+                        movieDiv.className = `movie ${movie.enabled ? 'enabled' : 'disabled'}`;
+                        movieDiv.innerHTML = `
+                            <strong>${movie.name}</strong> - ${movie.city} 
+                            <small>(${movie.check_interval}s interval)</small>
+                            <br><small>${movie.url}</small>
+                            <br>
+                            <button class="toggle-btn ${movie.enabled ? '' : 'disabled'}" 
+                                    onclick="toggleMovie(${index})">
+                                ${movie.enabled ? 'Enabled' : 'Disabled'}
+                            </button>
+                            <button onclick="deleteMovie(${index})" style="background: #dc3545;">Delete</button>
+                        `;
+                        moviesDiv.appendChild(movieDiv);
+                    });
+                }
+                
+                async function addMovie() {
+                    const name = document.getElementById('movieName').value;
+                    const url = document.getElementById('movieUrl').value;
+                    const city = document.getElementById('movieCity').value;
+                    const interval = parseInt(document.getElementById('movieInterval').value);
+                    
+                    if (!name || !url) {
+                        alert('Please fill in movie name and URL');
+                        return;
+                    }
+                    
+                    await fetch('/api/add-movie', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, url, city, check_interval: interval })
+                    });
+                    
+                    document.getElementById('movieName').value = '';
+                    document.getElementById('movieUrl').value = '';
+                    loadMovies();
+                }
+                
+                async function toggleMovie(index) {
+                    await fetch('/api/toggle-movie', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ index })
+                    });
+                    loadMovies();
+                }
+                
+                async function deleteMovie(index) {
+                    if (confirm('Delete this movie?')) {
+                        await fetch('/api/delete-movie', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ index })
+                        });
+                        loadMovies();
+                    }
+                }
+                
+                loadMovies();
+            </script>
+        </body>
+        </html>
+        '''
+        
+        @app.route('/')
+        def index():
+            return render_template_string(HTML_TEMPLATE)
+        
+        @app.route('/api/config')
+        def get_config():
+            try:
+                with open(self.config_file, 'r') as f:
+                    return jsonify(json.load(f))
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        
+        @app.route('/api/add-movie', methods=['POST'])
+        def add_movie_api():
+            try:
+                movie_data = request.json
+                movie_data['enabled'] = True
+                
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                
+                config['movies'].append(movie_data)
+                
+                with open(self.config_file, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                return jsonify({'status': 'added'})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        
+        @app.route('/api/toggle-movie', methods=['POST'])
+        def toggle_movie_api():
+            try:
+                index = request.json['index']
+                
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                
+                config['movies'][index]['enabled'] = not config['movies'][index]['enabled']
+                
+                with open(self.config_file, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                return jsonify({'status': 'toggled'})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        
+        @app.route('/api/delete-movie', methods=['POST'])
+        def delete_movie_api():
+            try:
+                index = request.json['index']
+                
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                
+                del config['movies'][index]
+                
+                with open(self.config_file, 'w') as f:
+                    json.dump(config, f, indent=2)
+                
+                return jsonify({'status': 'deleted'})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        
+        # Run Flask app
+        app.run(host='0.0.0.0', port=int(os.environ.get('PORT', port)), debug=False)
+        
     def list_movies(self):
         """List all configured movies"""
         if not self.movies:
@@ -663,6 +854,8 @@ def main():
     parser.add_argument('--list', action='store_true', help='List configured movies')
     parser.add_argument('--check-once', action='store_true', help='Check all movies once and exit')
     parser.add_argument('--monitor', action='store_true', help='Start continuous monitoring')
+    parser.add_argument('--web', action='store_true', help='Start web interface')
+    parser.add_argument('--web-and-monitor', action='store_true', help='Start web interface and monitoring together')
     
     args = parser.parse_args()
     
@@ -677,6 +870,15 @@ def main():
         monitor.monitor_movies(run_once=True)
     elif args.monitor:
         monitor.monitor_movies()
+    elif args.web:
+        monitor.start_web_server()
+    elif args.web_and_monitor:
+        # Start monitoring in background thread
+        monitor_thread = threading.Thread(target=monitor.monitor_movies)
+        monitor_thread.daemon = True
+        monitor_thread.start()
+        # Start web server in main thread
+        monitor.start_web_server()
     else:
         # Interactive mode
         print("🎬 BookMyShow Movie Booking Alert System")
