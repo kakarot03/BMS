@@ -68,7 +68,7 @@ class AlertConfig:
     """Configuration for alert methods"""
     email_enabled: bool = False
     sms_enabled: bool = False
-    desktop_enabled: bool = True
+    desktop_enabled: bool = False
     sound_enabled: bool = True
 
 
@@ -229,7 +229,7 @@ class BookMyShowMonitor:
 
     def check_booking_status_selenium(self, movie: MovieConfig) -> bool:
         """
-        Use Selenium to check booking status by looking for 'Book tickets' text
+        Use Selenium to check booking status by looking for red 'Book tickets' button specifically
         """
         if not SELENIUM_AVAILABLE:
             self.logger.error("Selenium not available - cannot check booking status")
@@ -263,10 +263,7 @@ class BookMyShowMonitor:
                 self.logger.error(f"Timeout waiting for page to load: {wait_e}")
                 return False
             
-            # Get page content and search for "book tickets"
-            content = self.driver.page_source.lower()
-            
-            # Debug: Log page title and check for any booking-related text
+            # Debug: Log page title
             page_title = self.driver.title
             self.logger.info(f"Page title: {page_title}")
             
@@ -282,70 +279,135 @@ class BookMyShowMonitor:
                 
                 # Check again
                 new_title = self.driver.title
-                new_content = self.driver.page_source.lower()
                 
                 if 'cloudflare' in new_title.lower() or 'attention required' in new_title.lower():
                     self.logger.error(f"❌ Still blocked by Cloudflare for {movie.name}. Skipping this check.")
                     return False
                 else:
                     self.logger.info("✅ Successfully bypassed Cloudflare protection")
-                    content = new_content
                     page_title = new_title
             
             # Log basic page info
             self.logger.debug(f"Current URL: {self.driver.current_url}")
-            self.logger.debug(f"Page content length: {len(content)} characters")
             
-            # Check if page loaded successfully
-            if len(content) < 1000:
-                self.logger.warning(f"Page content seems incomplete ({len(content)} chars)")
+            # STRICT VALIDATION: Look specifically for red "Book tickets" button
+            booking_open = False
             
-            # Check multiple variations of booking text
-            booking_indicators = [
-                'book tickets',
-                'book ticket', 
-                'book now',
-                'buy tickets',
-                'buy ticket',
-                'tickets',
-                'available',
-                'select cinema'
-            ]
-            
-            found_indicators = []
-            for indicator in booking_indicators:
-                if indicator in content:
-                    found_indicators.append(indicator)
-            
-            # Also check if we can find any clickable elements that might indicate booking
             try:
-                # Look for common booking button selectors
-                booking_elements = self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Book') or contains(text(), 'book')]")
-                if booking_elements:
-                    self.logger.debug(f"Found {len(booking_elements)} booking button elements")
-                    found_indicators.append("booking_button_elements")
+                # Strategy 1: Look for "Book tickets" text with more comprehensive selectors
+                book_tickets_buttons = self.driver.find_elements(By.XPATH, 
+                    "//button[contains(text(), 'Book tickets')] | "
+                    "//a[contains(text(), 'Book tickets')] | "
+                    "//*[@role='button' and contains(text(), 'Book tickets')] | "
+                    "//div[contains(text(), 'Book tickets')] | "
+                    "//span[contains(text(), 'Book tickets')] | "
+                    "//*[contains(@class, 'book') and contains(text(), 'tickets')] | "
+                    "//*[contains(text(), 'Book tickets')]"
+                )
+                
+                if book_tickets_buttons:
+                    self.logger.debug(f"Found {len(book_tickets_buttons)} 'Book tickets' buttons")
                     
-                # Look for cinema selection elements
-                cinema_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Select') or contains(text(), 'Cinema')]")
-                if cinema_elements:
-                    self.logger.debug(f"Found {len(cinema_elements)} cinema selection elements")
-                    found_indicators.append("cinema_elements")
+                    # Check if any of these buttons have red/pink background
+                    for button in book_tickets_buttons:
+                        try:
+                            # Get computed styles
+                            bg_color = button.value_of_css_property('background-color')
+                            color = button.value_of_css_property('color')
+                            is_displayed = button.is_displayed()
+                            is_enabled = button.is_enabled()
+                            
+                            self.logger.debug(f"Button - BG: {bg_color}, Color: {color}, Displayed: {is_displayed}, Enabled: {is_enabled}")
+                            
+                            # Check for red/pink background colors (various formats)
+                            red_indicators = [
+                                'rgb(220, 53, 69)',  # Bootstrap danger red
+                                'rgb(248, 77, 122)', # Pink
+                                'rgb(231, 76, 60)',  # Red
+                                'rgb(255, 99, 132)', # Light red
+                                'rgb(220, 20, 60)',  # Crimson
+                                'rgb(240, 101, 149)', # BookMyShow pink
+                                'rgb(255, 105, 135)', # Coral pink
+                                'rgb(255, 92, 132)',  # BookMyShow button color
+                                'rgb(235, 87, 87)',   # Light coral
+                                '#dc3545', '#f84d7a', '#e74c3c', '#ff6384', '#dc143c',
+                                '#f06595', '#ff6987', '#ff5c84', '#eb5757'  # Additional pinks
+                            ]
+                            
+                            # Also check for any red-ish color (RGB with high red component)
+                            is_red_bg = False
+                            if bg_color and 'rgb' in bg_color:
+                                import re
+                                rgb_match = re.search(r'rgb\((\d+),\s*(\d+),\s*(\d+)\)', bg_color)
+                                if rgb_match:
+                                    r, g, b = map(int, rgb_match.groups())
+                                    # Red-ish if red component is high and significantly higher than green/blue
+                                    if r > 180 and r > (g + 50) and r > (b + 50):
+                                        is_red_bg = True
+                            
+                            # Check if background color matches any red indicator or is red-ish
+                            bg_is_red = any(red_color in bg_color for red_color in red_indicators) or is_red_bg
+                            
+                            if is_displayed and is_enabled and bg_is_red:
+                                self.logger.info(f"✅ Found valid red 'Book tickets' button! BG: {bg_color}")
+                                booking_open = True
+                                break
+                                
+                        except Exception as style_e:
+                            self.logger.debug(f"Error checking button styles: {style_e}")
+                            continue
+                
+                # Strategy 2: If no red button found, do a more nuanced check
+                if not booking_open:
+                    page_source = self.driver.page_source.lower()
                     
+                    # Check for both "I'm interested" and "book tickets" presence
+                    has_interested = "i'm interested" in page_source or "mark interested" in page_source
+                    has_book_tickets = "book tickets" in page_source
+                    
+                    if has_interested and not has_book_tickets:
+                        # Only "I'm interested" found - booking definitely NOT open
+                        self.logger.info(f"❌ Only 'I'm interested' found - booking NOT open for {movie.name}")
+                        return False
+                    elif has_book_tickets and not has_interested:
+                        # Only "book tickets" found but no red button - might be open but be cautious
+                        self.logger.warning(f"⚠️  Found 'book tickets' text but no red button for {movie.name}")
+                        # For now, still return False for strict validation unless we find the red button
+                        return False
+                    elif has_interested and has_book_tickets:
+                        # Both found - mixed state, some shows might be open
+                        self.logger.warning(f"⚠️  Mixed state detected for {movie.name}: both 'interested' and 'book tickets' found")
+                        # Look for any clickable "book tickets" buttons even without strict color validation
+                        fallback_buttons = self.driver.find_elements(By.XPATH, 
+                            "//button[contains(text(), 'Book tickets')] | "
+                            "//a[contains(text(), 'Book tickets')] | "
+                            "//div[contains(text(), 'Book tickets')] | "
+                            "//span[contains(text(), 'Book tickets')] | "
+                            "//*[contains(text(), 'Book tickets')]"
+                        )
+                        for button in fallback_buttons:
+                            try:
+                                if button.is_displayed() and button.is_enabled():
+                                    self.logger.info(f"✅ Found enabled 'Book tickets' button in mixed state for {movie.name}")
+                                    return True
+                            except:
+                                continue
+                        self.logger.info(f"❌ No enabled 'Book tickets' buttons found in mixed state for {movie.name}")
+                        return False
+                    else:
+                        # Neither found clearly - unclear state
+                        self.logger.warning(f"⚠️  Unclear booking state for {movie.name} - neither clear 'interested' nor 'book tickets' found")
+                        return False
+                
             except Exception as elem_e:
-                self.logger.warning(f"Error checking for booking elements: {elem_e}")
+                self.logger.error(f"Error during strict booking validation: {elem_e}")
+                return False
             
-            if found_indicators:
-                self.logger.info(f"🎉 Booking is OPEN for {movie.name}! Found: {found_indicators}")
+            if booking_open:
+                self.logger.info(f"🎉 STRICT VALIDATION PASSED: Red 'Book tickets' button found for {movie.name}!")
                 return True
             else:
-                self.logger.info(f"Booking not yet open for {movie.name}")
-                
-                # Additional debug: check if we're on the right page
-                if 'bookmyshow' not in self.driver.current_url.lower():
-                    self.logger.warning(f"Warning: Not on BookMyShow domain. Current URL: {self.driver.current_url}")
-                if 'error' in content or '404' in content or 'not found' in content:
-                    self.logger.warning("Warning: Page might contain error content")
-                    
+                self.logger.info(f"❌ STRICT VALIDATION FAILED: No red 'Book tickets' button found for {movie.name}")
                 return False
                 
         except Exception as e:
